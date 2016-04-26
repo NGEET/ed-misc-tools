@@ -16,7 +16,10 @@ build/
 *.regression
 
 # simulation output
-*.output.nc
+*.nc
+*.nc.rest
+*.nc.base
+
 
 # os x junk
 .DS_Store
