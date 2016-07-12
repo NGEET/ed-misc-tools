@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""Tool to consistently run a case in several different version of
+"""Tool to consistently run a case in several different versions of
 ed-clm. Inspired by 'git bisect', but manually selects changeset ids
 inorder to automate the case creation and running.
 
@@ -7,10 +7,11 @@ inorder to automate the case creation and running.
 * clone the ed-clm repo
 * create a case from a template
 * build
-* run a case. 
+* run a case.
 
-FIXME(bja, 201603) there is a bunch of hard coded info that can easily
-be moved into a configuration file to make this more generic.
+The changeset ids and test commands are specified in a cfg/ini format
+configuration file. Run this script with --write-template to generate
+a template configuration file.
 
 Author: Ben Andre <andre@ucar.edu>
 
@@ -53,6 +54,21 @@ else:
 #
 # globals
 #
+VERSION_CONTROL = 'version_control'
+GIT_REF_REPO = 'git_ref_repo'
+BRANCH_BASE = 'branch_base'
+CHANGESET_IDS = 'changeset_ids'
+
+BISECT_TEST = 'bisect_test'
+BISECT_TYPE = 'type'
+RUN_TEST = 'test'
+RESOLUTION = 'resolution'
+COMPSET = 'compset'
+MACHINE = 'machine'
+COMPILER = 'compiler'
+TEST_MODS = 'test_mods'
+TEST_COMMANDS = 'test_commands'
+
 
 
 # -------------------------------------------------------------------------------
@@ -73,14 +89,50 @@ def commandline_options():
                         help='show exception backtraces as extra debugging '
                         'output')
 
-    parser.add_argument('--debug', action='store_true',
-                        help='extra debugging output')
-
     parser.add_argument('--config', nargs=1,
                         help='path to config file')
 
+    parser.add_argument('--debug', action='store_true',
+                        help='extra debugging output')
+
+    parser.add_argument('--dry-run', action='store_true',
+                        help='just do a try run, don\' execute commands')
+
+    parser.add_argument('--write-template', nargs='?',
+                        const='template.cfg', default=None,
+                        help='write a template config file')
+
     options = parser.parse_args()
     return options
+
+
+def write_config_template(filename):
+    """
+    """
+    print(filename)
+    template = config_parser()
+    section = VERSION_CONTROL
+    template.add_section(section)
+    template.set(section, GIT_REF_REPO, 'relative path to main repository')
+    template.set(section, BRANCH_BASE,
+                 '"base name of branch. changeset will be appended. '
+                 'example foo-bar becomes foo-bar-ID."')
+    template.set(section, CHANGESET_IDS, 'comma separeted list of '
+                 'changeset ids')
+
+    section = BISECT_TEST
+    template.add_section(section)
+    template.set(section, BISECT_TYPE, '"test" or "newcase"')
+    template.set(section, RUN_TEST, 'only if "test" type, e.g. ERS_D_Ld3')
+    template.set(section, RESOLUTION, 'e.g. f10_f10')
+    template.set(section, COMPSET, 'e.g. ICLM50BGC')
+    template.set(section, MACHINE, 'supported machine name')
+    template.set(section, COMPILER, 'supported compiler name')
+    template.set(section, TEST_MODS, 'only if "test" type, e.g. clm-default')
+    template.set(section, TEST_COMMANDS, 'comma separated list of quoted strings with commands needed to run the test.')
+
+    with open('{0}.cfg'.format(filename), 'wb') as configfile:
+        template.write(configfile)
 
 
 def read_config_file(filename):
@@ -104,49 +156,81 @@ def read_config_file(filename):
 # work functions
 #
 # -------------------------------------------------------------------------------
-def generate_id(changset_id):
+def generate_id(basename, changset_id):
     """
     """
-    casename = 'ed-clm-i24-{0}'.format(changset_id)
+    casename = '{0}-{1}'.format(basename, changset_id)
     return casename
 
 
-def create_case(case_name, logfile):
+def generate_newcase_command(config, case_name):
     """
     """
     newcase = Template("""
-./create_newcase -case ${case_name} -res ${res} -compset ${compset} -mach ${mach}
+    ./create_newcase -case ${case_name} -res ${resolution} -compset ${compset} -mach ${machine} -compiler ${COMPILER}
     """)
 
     run_info = {'case_name': case_name,
-                'res': '4x5_4x5',
-                'compset': 'ICLM45ED',
-                'mach': 'yellowstone',
+                'resolution': config.get(BISECT_TEST, RESOLUTION),
+                'compset': config.get(BISECT_TEST, COMPSET),
+                'machine': config.get(BISECT_TEST, MACHINE),
+                'compiler': config.get(BISECT_TEST, COMPILER),
     }
     case = newcase.substitute(run_info)
     cmd = case.split()
-    print(cmd)
-    output = subprocess.check_output(cmd, shell=False, stderr=subprocess.STDOUT)
-    logfile.write(output)
+    return case_name, cmd
 
-    os.chdir(case_name)
-    commands = [
-        "./xmlchange -file env_run.xml -id STOP_OPTION -val nmonths",
-        "./xmlchange -file env_run.xml -id STOP_N -val 1",
-        "./xmlchange DOUT_S=FALSE",
-        "./xmlchange -file env_run.xml -id CLM_BLDNML_OPTS -val \'-no-megan\' --append",
-        "./cesm_setup",
-        "./{0}.build".format(case_name),
-        "./{0}.submit".format(case_name),
-    ]
 
-    for my_cmd in commands:
-        cmd = my_cmd.split()
-        print(cmd)
-        output = subprocess.check_output(cmd, shell=False, stderr=subprocess.STDOUT)
+def generate_test_command(config, case_name):
+    """
+    """
+    testname = Template("""${test_type}.${resolution}.${compset}.${machine}_${compiler}.${test_mods}""")
+
+    newtest = Template("""
+    ./create_test -testname ${testname} -testid ${case_name}
+    """)
+
+    run_info = {'case_name': case_name,
+                'resolution': config.get(BISECT_TEST, RESOLUTION),
+                'compset': config.get(BISECT_TEST, COMPSET),
+                'machine': config.get(BISECT_TEST, MACHINE),
+                'compiler': config.get(BISECT_TEST, COMPILER),
+                'test_type': config.get(BISECT_TEST, RUN_TEST),
+                'test_mods': config.get(BISECT_TEST, TEST_MODS)
+    }
+    name = testname.substitute(run_info)
+    run_info['testname'] = name
+    case = newtest.substitute(run_info)
+    cmd = case.split()
+    name = '{0}.{1}'.format(name, case_name)
+    return name, cmd
+
+
+def bisect_test(config, case_id, logfile, dry_run):
+    """
+    """
+    if config.get(BISECT_TEST, BISECT_TYPE) == 'newcase':
+        case_name, command = generate_newcase_command(config, case_id)
+    else:
+        case_name, command = generate_test_command(config, case_id)
+
+    print(command)
+    if not dry_run:
+        output = subprocess.check_output(
+            command, shell=False, stderr=subprocess.STDOUT)
         logfile.write(output)
 
+    if not dry_run:
+        os.chdir(case_name)
 
+    commands = config.get(BISECT_TEST, TEST_COMMANDS)
+    for my_cmd in commands.split():
+        cmd = my_cmd.format(case_name=case_name)
+        print(cmd)
+        if not dry_run:
+            output = subprocess.check_output(
+                cmd, shell=False, stderr=subprocess.STDOUT)
+            logfile.write(output)
 
 
 # -------------------------------------------------------------------------------
@@ -154,7 +238,7 @@ def create_case(case_name, logfile):
 # git wrapper functions
 #
 # -------------------------------------------------------------------------------
-def clone_ref_repo(repo_dir, temp_repo_dir):
+def clone_ref_repo(repo_dir, temp_repo_dir, dry_run):
     """Clone the existing git repo.
 
     NOTE: assumes a fixed directory structure. If this script is
@@ -169,10 +253,11 @@ def clone_ref_repo(repo_dir, temp_repo_dir):
         repo_dir,
         temp_repo_dir,
     ]
-    subprocess.check_output(cmd, shell=False, stderr=subprocess.STDOUT)
+    if not dry_run:
+        subprocess.check_output(cmd, shell=False, stderr=subprocess.STDOUT)
 
 
-def checkout_git_branch(changeset_id, branch_name):
+def checkout_git_branch(changeset_id, branch_name, dry_run):
     """checkout the specified changset
     """
     cmd = [
@@ -182,52 +267,52 @@ def checkout_git_branch(changeset_id, branch_name):
         branch_name,
         changeset_id
     ]
-    subprocess.check_output(cmd, shell=False, stderr=subprocess.STDOUT)
+    if not dry_run:
+        subprocess.check_output(cmd, shell=False, stderr=subprocess.STDOUT)
 
-
-     
 
 # -------------------------------------------------------------------------------
 #
 # main
 #
 # -------------------------------------------------------------------------------
-
 def main(options):
-    #config = read_config_file(options.config[0])
-    cwd = os.getcwd()
+    if options.write_template:
+        write_config_template(options.write_template)
+        return 0
 
-    ref_git_repo = 'ed-clm'
+    dry_run = options.dry_run
+    config = read_config_file(options.config[0])
+
+    if not config.has_section('version_control'):
+        raise RuntimeError('Configuration file must have a "version_control"'
+                           ' section.')
+    cwd = os.getcwd()
+    ref_git_repo = config.get(VERSION_CONTROL, GIT_REF_REPO)
     repo_dir = os.path.abspath("{0}/{1}".format(cwd, ref_git_repo))
 
-    changeset_ids = [
-        '19fe5678',
-        '8740a1a3',
-        '90c37589',
-        'c3a1f922',
-        '2d3e7c59',
-        '69a361b0',
-        'eb26be69',
-        'eff944c0',
-        '3a8f2d85',
-        '5dd2f23e',
-    ]
+    changeset_ids = config.get(VERSION_CONTROL, CHANGESET_IDS).split()
+    print(changeset_ids)
 
-    with open('i24.log', 'w') as logfile:
+    log_filename = '{0}.log'.format(config.get(VERSION_CONTROL, BRANCH_BASE))
+    with open(log_filename, 'w') as logfile:
         for changeset in changeset_ids:
             os.chdir(cwd)
-            run_id = generate_id(changeset)
+            run_id = generate_id(config.get(VERSION_CONTROL, BRANCH_BASE),
+                                 changeset)
             temp_repo_dir = "{0}/{1}".format(cwd, run_id)
             if os.path.isdir(temp_repo_dir):
                 raise RuntimeError(
                     "ERROR: temporary git repo dir already exists:\n    {0}".format(temp_repo_dir))
-            clone_ref_repo(repo_dir, temp_repo_dir)
-            os.chdir(temp_repo_dir)
-            checkout_git_branch(changeset, run_id)
+            clone_ref_repo(repo_dir, temp_repo_dir, dry_run)
+            if not dry_run:
+                os.chdir(temp_repo_dir)
+            checkout_git_branch(changeset, run_id, dry_run)
 
             scripts_dir = "{0}/cime/scripts".format(temp_repo_dir)
-            os.chdir(scripts_dir)
-            create_case(run_id, logfile)
+            if not dry_run:
+                os.chdir(scripts_dir)
+            bisect_test(config, run_id, logfile, dry_run)
 
     return 0
 
